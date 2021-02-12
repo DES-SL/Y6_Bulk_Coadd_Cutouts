@@ -15,9 +15,19 @@ import fitsio
 
 BANDS  = ['G','R','I','Z']
 BINDEX = { b:i for i,b in enumerate(BANDS)}
-IMAGES = ['IMAGE','PSF','MASK'] # not carrying the weight...
+EXTS   = ['IMAGE','PSF','MASK'] # not carrying the weight...
 
 def mkdir(path):
+    """ Create a path an return it 
+
+    Parameters
+    ----------
+    path : path to create
+    
+    Returns
+    -------
+    path : path created
+    """
     # https://stackoverflow.com/a/600612/4075339
     try:
         os.makedirs(path)
@@ -90,25 +100,33 @@ def create_image_header(stack,metadata,index,band):
     suffix = '_%s'%band
 
     hdr = dict()
-    hdr['OBJID']  = metadata['CUTOUT_ID'][index]
-    hdr['RA']     = metadata['RA'][index]
-    hdr['DEC']    = metadata['DEC'][index]
+    hdr['OBJID']  = stack['CUTOUT_ID'][index][0]
 
-    for column in metadata.columns:
-        if not column.endswith(suffix): continue
-        if column.startswith('FILEPATH'): continue
-        key = column.rsplit(suffix,1)[0]
-        value = metadata[column][index]
-        value = np.nan_to_num(value)
-        if key == 'CCD_EDGE': value = int(value)
-        hdr[key] = value
+    if metadata:
+        hdr['RA']     = metadata['RA'][index]
+        hdr['DEC']    = metadata['DEC'][index]
+         
+        for column in metadata.columns:
+            if not column.endswith(suffix): continue
+            if column.startswith('FILEPATH'): continue
+            key = column.rsplit(suffix,1)[0]
+            value = metadata[column][index]
+            value = np.nan_to_num(value)
+            if key == 'CCD_EDGE': value = int(value)
+            hdr[key] = value
+
+            path = metadata['FILEPATH_IMAGE'+suffix][index]
+            dirname = os.path.dirname(path)
+            filename = os.path.basename(path)
+            hdr['PATH']  = dirname
+            hdr['FILENAME'] = filename
 
     try:
         # Adjust the WCS
         hdr['CRPIX1'] = hdr['CRPIX1'] - hdr['DCRPIX1']
         hdr['CRPIX2'] = hdr['CRPIX2'] - hdr['DCRPIX2']
-    except ValueError as e:
-        print(e)
+    except KeyError as e:
+        pass
 
     if 'IMG_SCALE' in stack:
         # Need to convert to signed 16-bit integers
@@ -121,13 +139,6 @@ def create_image_header(stack,metadata,index,band):
         bscale, bzero = make_bvalues(minval,scale)
         hdr['BZERO']  = np.nan_to_num(bzero)
         hdr['BSCALE'] = np.nan_to_num(bscale)
-
-
-    path = metadata['FILEPATH_IMAGE'+suffix][index]
-    dirname = os.path.dirname(path)
-    filename = os.path.basename(path)
-    hdr['PATH']  = dirname
-    hdr['FILENAME'] = filename
 
     return hdr
 
@@ -148,7 +159,14 @@ def create_psf_header(stack,metadata,index,band):
     suffix = '_%s'%band
     hdr = stack['PSF'].read_header()
 
-    hdr['PSF_SAMP']  = np.nan_to_num(metadata['PSF_SAMP'+suffix][index])
+    if metadata:
+        hdr['PSF_SAMP']  = np.nan_to_num(metadata['PSF_SAMP'+suffix][index])
+         
+        path = metadata['FILEPATH_PSF'+suffix][index]
+        dirname  = os.path.dirname(path)
+        filename = os.path.basename(path)
+        hdr['PATH']  = dirname
+        hdr['FILENAME'] = filename
 
     if 'PSF_SCALE' in stack:
         minval = np.nan_to_num(stack['PSF_MIN'][index,BINDEX[band]].item())
@@ -161,20 +179,40 @@ def create_psf_header(stack,metadata,index,band):
         hdr['BZERO']  = np.nan_to_num(bzero)
         hdr['BSCALE'] = np.nan_to_num(bscale)
 
-    path = metadata['FILEPATH_PSF'+suffix][index]
-    dirname  = os.path.dirname(path)
-    filename = os.path.basename(path)
-    hdr['PATH']  = dirname
-    hdr['FILENAME'] = filename
     return hdr
 
 def create_mask_header(stack,metadata,index,band):
+    """ Create header for MASK HDU 
+
+    Parameters
+    ----------
+    stack    : the fits hdulist of the image stack
+    metadata : data frame of metadata
+    index    : the index of the image to extract
+    band     : the band of the image to extract
+    
+    Returns
+    -------
+    hdr      : header dictionary
+    """
     hdr = dict()
     return hdr
 
 def parse_index(args,stack):
-    objids = stack['CUTOUT_ID'].read('CUTOUT_ID')
-    indexes = np.arange(len(objids))
+    """ Convert command line arguments to an array of indices.
+
+    Parameters
+    ----------
+    args  : command line arguments from argparse
+    stack : FITS HDU object
+
+    Returns
+    -------
+    indexes : array of indexes
+    """
+    cutids = stack['CUTOUT_ID'].read()
+    cutids = cutids[cutids.dtype.names[0]]
+    indexes = np.arange(len(cutids))
     
     if args.index:
         index = args.index
@@ -184,8 +222,10 @@ def parse_index(args,stack):
             index = index[0]
             s = slice(*[int(x) if x else None for x in index.split(':')])
             return indexes[s]
-    if args.objid:
-        return np.where(np.in1d(objids,args.objid))[0]
+    if args.cutid:
+        match = np.in1d(cutids,np.array(args.cutid).astype(cutids.dtype))
+        indexes = np.where(match)[0]
+        return indexes
     elif args.all:
         return indexes
     else:
@@ -193,6 +233,7 @@ def parse_index(args,stack):
         raise ValueError(msg)
 
 def load_metadata(filename):
+    if not filename: return None
     metadata = pd.read_csv(filename)
     # Need to replace NaN in string columns
     columns = [col for col in metadata if col.startswith('FILEPATH')]
@@ -204,15 +245,15 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('filename',help="cutout file")
-    parser.add_argument('metadata',help="metadata file")
+    parser.add_argument('metadata',nargs='?',help="metadata file")
     parser.add_argument('-d','--dirname',default='image_cutouts',
                         help="output directory name")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-a','--all',action='store_true',
                        help="process all cutouts")
-    group.add_argument('-i','--index',type=str,action='append',
+    group.add_argument('-i','--index',nargs='+',type=str,action='append',
                        help="index of cutouts to process (int, list, or slice str)")
-    group.add_argument('-o','--objid',type=str,action='append',
+    group.add_argument('-c','--cutid',nargs='+',type=str,action='append',
                        help="cutout id to process (int or list)")
     parser.add_argument('-v','--verbose',action='count',
                         help="output verbosity")
@@ -232,15 +273,16 @@ if __name__ == "__main__":
 
     for index in indexes:
         index = int(index)
-        objid = metadata['CUTOUT_ID'][index]
+        cutid = stack['CUTOUT_ID'][index][0]
 
-        outfile = os.path.join(dirname,'cutout_%s.fits.gz'%objid)
+        outfile = os.path.join(dirname,'cutout_%s.fits.gz'%cutid)
         if os.path.exists(outfile):
             os.remove(outfile)
 
         logging.info("Writing %s..."%outfile)
         out = fitsio.FITS(outfile,'rw')
-        for extname in IMAGES:
+        for extname in EXTS:
+            if not extname in stack: continue
             data = stack[extname][index,:,:,:][0]
             for i,band in enumerate(BANDS):
                 outname = "%s_%s"%(extname,band)
