@@ -28,6 +28,25 @@ def mkdir(path):
             raise
     return path
 
+def make_bvalues(amin,ascale):
+    """Convert stack scale and min values to FITS BSCALE and BZERO.
+    
+    Parameters
+    ----------
+    amin   : array minimum
+    ascale : array scale value
+
+    Returns
+    -------
+    bscale, bzero : FITS header keyword values
+    """
+    bscale0 = 1.0
+    bzero0  = 32768
+    amax0   = 65535
+    bscale = ascale/amax0 * bscale0
+    bzero  = bzero0 * (ascale/amax0) + amin
+    return bscale, bzero
+
 def create_header(extname,stack,metadata,index,band):
     """Create a header for an array.
 
@@ -84,10 +103,29 @@ def create_image_header(stack,metadata,index,band):
         if key == 'CCD_EDGE': value = int(value)
         hdr[key] = value
 
-    hdr['IMG_MIN']   = np.nan_to_num(stack['IMG_MIN'][index,BINDEX[band]].item())
-    hdr['IMG_SCALE'] = np.nan_to_num(stack['IMG_SCALE'][index,BINDEX[band]].item())
-    dirname = os.path.dirname(metadata['FILEPATH_IMAGE'+suffix][index])
-    filename = os.path.basename(metadata['FILEPATH_IMAGE'+suffix][index])
+    try:
+        # Adjust the WCS
+        hdr['CRPIX1'] = hdr['CRPIX1'] - hdr['DCRPIX1']
+        hdr['CRPIX2'] = hdr['CRPIX2'] - hdr['DCRPIX2']
+    except ValueError as e:
+        print(e)
+
+    if 'IMG_SCALE' in stack:
+        # Need to convert to signed 16-bit integers
+
+        minval = np.nan_to_num(stack['IMG_MIN'][index,BINDEX[band]].item())
+        scale  = np.nan_to_num(stack['IMG_SCALE'][index,BINDEX[band]].item())
+        hdr['IMG_MIN']   = minval
+        hdr['IMG_SCALE'] = scale
+
+        bscale, bzero = make_bvalues(minval,scale)
+        hdr['BZERO']  = np.nan_to_num(bzero)
+        hdr['BSCALE'] = np.nan_to_num(bscale)
+
+
+    path = metadata['FILEPATH_IMAGE'+suffix][index]
+    dirname = os.path.dirname(path)
+    filename = os.path.basename(path)
     hdr['PATH']  = dirname
     hdr['FILENAME'] = filename
 
@@ -110,12 +148,22 @@ def create_psf_header(stack,metadata,index,band):
     suffix = '_%s'%band
     hdr = stack['PSF'].read_header()
 
-    hdr['PSF_MIN']   = np.nan_to_num(stack['PSF_MIN'][index,BINDEX[band]].item())
-    hdr['PSF_SCALE'] = np.nan_to_num(stack['PSF_SCALE'][index,BINDEX[band]].item())
     hdr['PSF_SAMP']  = np.nan_to_num(metadata['PSF_SAMP'+suffix][index])
 
-    dirname = os.path.dirname(metadata['FILEPATH_PSF'+suffix][index])
-    filename = os.path.basename(metadata['FILEPATH_PSF'+suffix][index])
+    if 'PSF_SCALE' in stack:
+        minval = np.nan_to_num(stack['PSF_MIN'][index,BINDEX[band]].item())
+        scale  = np.nan_to_num(stack['PSF_SCALE'][index,BINDEX[band]].item())
+        hdr['PSF_MIN']   = minval
+        hdr['PSF_SCALE'] = scale
+
+        # Need to convert to signed 16-bit integers
+        bscale, bzero = make_bvalues(minval,scale)
+        hdr['BZERO']  = np.nan_to_num(bzero)
+        hdr['BSCALE'] = np.nan_to_num(bscale)
+
+    path = metadata['FILEPATH_PSF'+suffix][index]
+    dirname  = os.path.dirname(path)
+    filename = os.path.basename(path)
     hdr['PATH']  = dirname
     hdr['FILENAME'] = filename
     return hdr
@@ -125,7 +173,7 @@ def create_mask_header(stack,metadata,index,band):
     return hdr
 
 def parse_index(args,stack):
-    objids = stack['CUTOUT_ID'].read('CUTOUT_ID').astype(int)
+    objids = stack['CUTOUT_ID'].read('CUTOUT_ID')
     indexes = np.arange(len(objids))
     
     if args.index:
@@ -144,6 +192,14 @@ def parse_index(args,stack):
         msg = "Missing index argument"
         raise ValueError(msg)
 
+def load_metadata(filename):
+    metadata = pd.read_csv(filename)
+    # Need to replace NaN in string columns
+    columns = [col for col in metadata if col.startswith('FILEPATH')]
+    metadata[columns] = metadata[columns].fillna('')
+
+    return metadata
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
@@ -154,9 +210,9 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('-a','--all',action='store_true',
                        help="process all cutouts")
-    group.add_argument('-i','--index',type=str,action='append'
+    group.add_argument('-i','--index',type=str,action='append',
                        help="index of cutouts to process (int, list, or slice str)")
-    group.add_argument('-o','--objid',type=int,action='append',
+    group.add_argument('-o','--objid',type=str,action='append',
                        help="cutout id to process (int or list)")
     parser.add_argument('-v','--verbose',action='count',
                         help="output verbosity")
@@ -168,7 +224,7 @@ if __name__ == "__main__":
         logging.getLogger().setLevel(logging.DEBUG)
 
     stack = fitsio.FITS(args.filename)
-    metadata = pd.read_csv(args.metadata)
+    metadata = load_metadata(args.metadata)
 
     indexes = parse_index(args,stack)
 
@@ -178,7 +234,7 @@ if __name__ == "__main__":
         index = int(index)
         objid = metadata['CUTOUT_ID'][index]
 
-        outfile = os.path.join(dirname,'cutout_%d.fits.gz'%objid)
+        outfile = os.path.join(dirname,'cutout_%s.fits.gz'%objid)
         if os.path.exists(outfile):
             os.remove(outfile)
 
