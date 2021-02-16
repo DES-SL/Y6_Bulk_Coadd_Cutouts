@@ -102,7 +102,7 @@ def create_image_header(stack,metadata,index,band):
     hdr = dict()
     hdr['OBJID']  = stack['CUTOUT_ID'][index][0]
 
-    if metadata:
+    if metadata is not None:
         hdr['RA']     = metadata['RA'][index]
         hdr['DEC']    = metadata['DEC'][index]
          
@@ -159,7 +159,7 @@ def create_psf_header(stack,metadata,index,band):
     suffix = '_%s'%band
     hdr = stack['PSF'].read_header()
 
-    if metadata:
+    if metadata is not None:
         hdr['PSF_SAMP']  = np.nan_to_num(metadata['PSF_SAMP'+suffix][index])
          
         path = metadata['FILEPATH_PSF'+suffix][index]
