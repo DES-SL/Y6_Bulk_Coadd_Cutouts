@@ -15,6 +15,7 @@ import sys
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
+import fitsio
 import numpy as np
 import pandas as pd
 
@@ -152,6 +153,36 @@ class CutoutProducer:
 
         self.coadd_ids = np.array(self.metadata['COADD_OBJECT_ID'].values, dtype=int)
         return
+
+    def get_tile_wcs(self):
+        """
+        Read the wcs information from the file header. This method is not used to
+        obtain the wcs that other functions in this class use. This information 
+        is written directly to the output fits file so that the original WCS info
+        is a part of the final cutous.
+
+        :return: wcs_table: table of wcs info to be written to output file
+        """
+        DTYPE = [ (f"CTYPE{i}",'S8') for i in [1,2]] +\
+                [ (f"DCRPIX{i}",float) for i in [1,2]] + \
+                [ (f"CRPIX{i}", float) for i in [1,2]]  + \
+                [ (f"CRVAL{i}", float) for i in [1,2]]  + \
+                [ (f"CD{j}_{i}",float) for i in [1,2] for j in [1,2]] #  + \
+                #[ (f"PV{j}_{i}",float) for i in range(11) for j in [1,2]]
+        DTYPES = [ (n, (d, len(self.bands))) for n, d in DTYPE]
+
+        wcs_table = np.zeros(1, dtype=DTYPES)
+        wcs_table.fill(np.nan)
+        for idx, band in enumerate(self.bands):
+            tile_filename = self.get_tile_filename(band)
+            hdr = fitsio.read_header(tile_filename, ext='SCI')
+            for name, dt in DTYPE:
+                try:
+                    wcs_table[name][:,idx] = hdr[name]
+                except KeyError:
+                    pass
+
+        return wcs_table
 
     def get_object_xy(self, wcs):
         """
@@ -319,12 +350,6 @@ class CutoutProducer:
         # Make an empty PRIMARY HDU
         primary = fits.PrimaryHDU()
 
-        # Make the COADD_ID HDU
-        if not hasattr(self, "coadd_ids"):
-            self.get_coadd_ids()
-        col = fits.Column(name='COADD_OBJECT_ID', array=self.coadd_ids, format='J')
-        coadd_ids = fits.BinTableHDU.from_columns([col], name="CUTOUT_ID")
-
         # Make the IMAGE HDU
         image = fits.ImageHDU(image_array, name="IMAGE")
 
@@ -334,16 +359,25 @@ class CutoutProducer:
             header_dict[f'PSFSAMP{b}'] = eval(f"self.psf_samp_{b}")
         psf = fits.ImageHDU(psf_array, name="PSF", header=fits.Header(header_dict))
 
-        # Make the img_min and img_scale HDUs
-        img_min = fits.ImageHDU(img_min, name="IMG_MIN")
-        img_scale = fits.ImageHDU(img_scale, name="IMG_SCALE")
+        # Make the INFO HDU
+        if not hasattr(self, "coadd_ids"):
+            self.get_coadd_ids()
+        data_info = {'ID':        {'NAME': 'self.coadd_ids', 'DTYPE': 'S14'},
+                     'IMG_MIN':   {'NAME': 'img_min',        'DTYPE': (float, len(self.bands))},
+                     'IMG_SCALE': {'NAME': 'img_scale',      'DTYPE': (float, len(self.bands))},
+                     'PSF_MIN':   {'NAME': 'psf_min',        'DTYPE': (float, len(self.bands))},
+                     'PSF_SCALE': {'NAME': 'psf_scale',      'DTYPE': (float, len(self.bands))}}
+        dtypes = [(name, info['DTYPE']) for name, info in data_info.items()]
+        table = np.zeros(len(self.coadd_ids), dtype=dtypes)
+        for name, info in data_info.items():
+            table[name] = eval(info['NAME'])
+        info = fits.BinTableHDU(data=table, name='INFO')
 
-        # Make the psf_min and psf_scale HDUs
-        psf_min = fits.ImageHDU(psf_min, name="PSF_MIN")
-        psf_scale = fits.ImageHDU(psf_scale, name="PSF_SCALE")
+        # Make the WCS HDU
+        wcs = fits.BinTableHDU(data=self.get_tile_wcs(), name='WCS')
 
         # Write the file
-        hdu_list = fits.HDUList([primary, coadd_ids, image, psf, img_min, img_scale, psf_min, psf_scale])
+        hdu_list = fits.HDUList([primary, image, psf, info, wcs])
         if not out_dir.endswith('/') and out_dir != '':
             out_dir += '/'
         hdu_list.writeto(f'{out_dir}{self.tilename}.fits', overwrite=True)
@@ -356,7 +390,8 @@ if __name__ == "__main__":
     CUTOUT_SIZE = 45
     PSF_CUTOUT_SIZE = 25
     BANDS = "griz"
-    OUTDIR = "/data/des81.b/data/stronglens/Y6_CUTOUT_IMAGES/"
+    #OUTDIR = "/data/des81.b/data/stronglens/Y6_CUTOUT_IMAGES/"
+    OUTDIR = "/data/des81.b/data/stronglens/PRODUCTION/Y6_CUTOUT_IMAGES/full_tile_test/"
 
     # Make a CutoutProducer for the tile
     cutout_prod = CutoutProducer(tilename, CUTOUT_SIZE, PSF_CUTOUT_SIZE, bands=BANDS)
